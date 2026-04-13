@@ -2,7 +2,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
+from datetime import datetime, timedelta
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
+
+# Restock orders created at runtime; in-memory so they reset on restart (matches existing mock-data pattern)
+submitted_orders: list = []
+RESTOCK_LEAD_TIME_DAYS = 14
 
 app = FastAPI(title="Factory Inventory Management System")
 
@@ -89,6 +94,7 @@ class DemandForecast(BaseModel):
     forecasted_demand: int
     trend: str
     period: str
+    unit_cost: Optional[float] = None
 
 class BacklogItem(BaseModel):
     id: str
@@ -119,6 +125,27 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockLineItem(BaseModel):
+    item_sku: str
+    item_name: str
+    quantity: int
+    unit_cost: float
+
+class CreateRestockOrderRequest(BaseModel):
+    items: List[RestockLineItem]
+    budget: Optional[float] = None
+
+class SubmittedOrder(BaseModel):
+    id: str
+    order_number: str
+    order_date: str
+    expected_delivery: str
+    lead_time_days: int
+    status: str
+    items: List[RestockLineItem]
+    total_value: float
+    budget: Optional[float] = None
 
 # API endpoints
 @app.get("/")
@@ -303,6 +330,39 @@ def get_monthly_trends():
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+@app.post("/api/restock-orders", response_model=SubmittedOrder)
+def create_restock_order(payload: CreateRestockOrderRequest):
+    """Create a new restock order from budget-based recommendations."""
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    now = datetime.now()
+    # Fixed lead time across all restock orders (simpler, predictable for the demo)
+    expected = now + timedelta(days=RESTOCK_LEAD_TIME_DAYS)
+
+    # Sequential order number within the submitted-orders list
+    order_seq = len(submitted_orders) + 1
+    total_value = round(sum(i.quantity * i.unit_cost for i in payload.items), 2)
+
+    order = {
+        "id": f"RSO-{order_seq:04d}",
+        "order_number": f"RSO-{now.strftime('%Y%m%d')}-{order_seq:03d}",
+        "order_date": now.strftime("%Y-%m-%d"),
+        "expected_delivery": expected.strftime("%Y-%m-%d"),
+        "lead_time_days": RESTOCK_LEAD_TIME_DAYS,
+        "status": "Submitted",
+        "items": [i.model_dump() for i in payload.items],
+        "total_value": total_value,
+        "budget": payload.budget
+    }
+    submitted_orders.append(order)
+    return order
+
+@app.get("/api/restock-orders", response_model=List[SubmittedOrder])
+def list_restock_orders():
+    """Return restock orders submitted in the current server session."""
+    return submitted_orders
 
 if __name__ == "__main__":
     import uvicorn
